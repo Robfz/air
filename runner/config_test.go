@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -15,6 +16,7 @@ const (
 
 func getWindowsConfig() Config {
 	build := cfgBuild{
+		PreCmd:       []string{"echo Hello Air"},
 		Cmd:          "go build -o ./tmp/main .",
 		Bin:          "./tmp/main",
 		Log:          "build-errors.log",
@@ -38,11 +40,10 @@ func getWindowsConfig() Config {
 }
 
 func TestBinCmdPath(t *testing.T) {
-
 	var err error
 
 	c := getWindowsConfig()
-	err = c.preprocess()
+	err = c.preprocess(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,6 @@ func TestDefaultPathConfig(t *testing.T) {
 	}}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(airWd, tt.path)
 			c, err := defaultPathConfig()
@@ -118,7 +118,7 @@ func TestReadConfByName(t *testing.T) {
 func TestConfPreprocess(t *testing.T) {
 	t.Setenv(airWd, "_testdata/toml")
 	df := defaultConfig()
-	err := df.preprocess()
+	err := df.preprocess(nil)
 	if err != nil {
 		t.Fatalf("preprocess error %v", err)
 	}
@@ -143,7 +143,9 @@ func TestConfigWithRuntimeArgs(t *testing.T) {
 
 	t.Run("when using bin", func(t *testing.T) {
 		df := defaultConfig()
-		df.preprocess()
+		if err := df.preprocess(nil); err != nil {
+			t.Fatalf("preprocess error %v", err)
+		}
 
 		if !contains(df.Build.ArgsBin, runtimeArg) {
 			t.Fatalf("missing expected runtime arg: %s", runtimeArg)
@@ -153,7 +155,9 @@ func TestConfigWithRuntimeArgs(t *testing.T) {
 	t.Run("when using full_bin", func(t *testing.T) {
 		df := defaultConfig()
 		df.Build.FullBin = "./tmp/main"
-		df.preprocess()
+		if err := df.preprocess(nil); err != nil {
+			t.Fatalf("preprocess error %v", err)
+		}
 
 		if !contains(df.Build.ArgsBin, runtimeArg) {
 			t.Fatalf("missing expected runtime arg: %s", runtimeArg)
@@ -168,6 +172,33 @@ func TestReadConfigWithWrongPath(t *testing.T) {
 	}
 	if c != nil {
 		t.Fatal("expect is nil but got a conf")
+	}
+}
+
+func TestKillDelay(t *testing.T) {
+	config := Config{
+		Build: cfgBuild{
+			KillDelay: 1000,
+		},
+	}
+	if config.killDelay() != (1000 * time.Millisecond) {
+		t.Fatal("expect KillDelay 1000 to be interpreted as 1000 milliseconds, got ", config.killDelay())
+	}
+	config.Build.KillDelay = 1
+	if config.killDelay() != (1 * time.Millisecond) {
+		t.Fatal("expect KillDelay 1 to be interpreted as 1 millisecond, got ", config.killDelay())
+	}
+	config.Build.KillDelay = 1_000_000
+	if config.killDelay() != (1 * time.Millisecond) {
+		t.Fatal("expect KillDelay 1_000_000 to be interpreted as 1 millisecond, got ", config.killDelay())
+	}
+	config.Build.KillDelay = 100_000_000
+	if config.killDelay() != (100 * time.Millisecond) {
+		t.Fatal("expect KillDelay 100_000_000 to be interpreted as 100 milliseconds, got ", config.killDelay())
+	}
+	config.Build.KillDelay = 0
+	if config.killDelay() != 0 {
+		t.Fatal("expect KillDelay 0 to be interpreted as 0, got ", config.killDelay())
 	}
 }
 

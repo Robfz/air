@@ -3,7 +3,6 @@ package runner
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -11,7 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -22,7 +21,7 @@ import (
 
 func TestNewEngine(t *testing.T) {
 	_ = os.Unsetenv(airWd)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -39,7 +38,7 @@ func TestNewEngine(t *testing.T) {
 
 func TestCheckRunEnv(t *testing.T) {
 	_ = os.Unsetenv(airWd)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -50,7 +49,7 @@ func TestCheckRunEnv(t *testing.T) {
 }
 
 func TestWatching(t *testing.T) {
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -66,11 +65,15 @@ func TestWatching(t *testing.T) {
 }
 
 func TestRegexes(t *testing.T) {
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
 	engine.config.Build.ExcludeRegex = []string{"foo\\.html$", "bar", "_test\\.go"}
+	err = engine.config.preprocess(nil)
+	if err != nil {
+		t.Fatalf("Should not be fail: %s.", err)
+	}
 
 	result, err := engine.isExcludeRegex("./test/foo.html")
 	if err != nil {
@@ -112,81 +115,82 @@ func TestRegexes(t *testing.T) {
 	}
 }
 
-func TestRerun(t *testing.T) {
-	tmpDir := initWithQuickExitGoCode(t)
+func TestRunCommand(t *testing.T) {
+	// generate a random port
+	port, f := GetPort()
+	f()
+	t.Logf("port: %d", port)
+	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
-	engine.config.Build.ExcludeUnchanged = true
-	engine.config.Build.Rerun = true
-	engine.config.Build.RerunDelay = 100
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
-	go func() {
-		engine.Run()
-		t.Logf("engine run")
-	}()
-
-	time.Sleep(time.Second * 1)
-
-	// stop engine
-	engine.Stop()
-	time.Sleep(time.Second * 1)
-	t.Logf("engine stopped")
-
-	if atomic.LoadUint64(&engine.round) <= 1 {
-		t.Fatalf("The engine did't rerun")
+	err = engine.runCommand("touch test.txt")
+	if err != nil {
+		t.Fatalf("Should not be fail: %s.", err)
+	}
+	if _, err := os.Stat("./test.txt"); err != nil {
+		if os.IsNotExist(err) {
+			t.Fatalf("Should not be fail: %s.", err)
+		}
 	}
 }
 
-func TestRerunWhenFileChanged(t *testing.T) {
-	tmpDir := initWithQuickExitGoCode(t)
+func TestRunPreCmd(t *testing.T) {
+	// generate a random port
+	port, f := GetPort()
+	f()
+	t.Logf("port: %d", port)
+	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
-	engine.config.Build.ExcludeUnchanged = true
-	engine.config.Build.Rerun = true
-	engine.config.Build.RerunDelay = 100
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
-	go func() {
-		engine.Run()
-		t.Logf("engine run")
-	}()
-	time.Sleep(time.Second * 1)
-
-	roundBeforeChange := atomic.LoadUint64(&engine.round)
-
-	t.Logf("start change main.go")
-	// change file of main.go
-	// just append a new empty line to main.go
-	time.Sleep(time.Second * 2)
-	file, err := os.OpenFile("main.go", os.O_APPEND|os.O_WRONLY, 0o644)
+	engine.config.Build.PreCmd = []string{"echo 'hello air' > pre_cmd.txt"}
+	err = engine.runPreCmd()
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
-	defer file.Close()
-	_, err = file.WriteString("\n")
+	if _, err := os.Stat("./pre_cmd.txt"); err != nil {
+		if os.IsNotExist(err) {
+			t.Fatalf("Should not be fail: %s.", err)
+		}
+	}
+}
+
+func TestRunPostCmd(t *testing.T) {
+	// generate a random port
+	port, f := GetPort()
+	f()
+	t.Logf("port: %d", port)
+	tmpDir := initTestEnv(t, port)
+	// change dir to tmpDir
+	chdir(t, tmpDir)
+
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
 
-	time.Sleep(time.Second * 1)
-	// stop engine
-	engine.Stop()
-	time.Sleep(time.Second * 1)
-	t.Logf("engine stopped")
+	engine.config.Build.PostCmd = []string{"echo 'hello air' > post_cmd.txt"}
+	err = engine.runPostCmd()
+	if err != nil {
+		t.Fatalf("Should not be fail: %s.", err)
+	}
 
-	roundAfterChange := atomic.LoadUint64(&engine.round)
-	if roundBeforeChange+1 >= roundAfterChange {
-		t.Fatalf("The engine didn't rerun")
+	if _, err := os.Stat("./post_cmd.txt"); err != nil {
+		if os.IsNotExist(err) {
+			t.Fatalf("Should not be fail: %s.", err)
+		}
 	}
 }
 
 func TestRunBin(t *testing.T) {
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -217,14 +221,17 @@ func TestRebuild(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	engine.config.Build.ExcludeUnchanged = true
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
+	wg := sync.WaitGroup{}
+	wg.Add(1)
 	go func() {
 		engine.Run()
 		t.Logf("engine stopped")
+		wg.Done()
 	}()
 	err = waitingPortReady(t, port, time.Second*10)
 	if err != nil {
@@ -232,7 +239,7 @@ func TestRebuild(t *testing.T) {
 	}
 	t.Logf("port is ready")
 
-	// start rebuld
+	// start rebuild
 
 	t.Logf("start change main.go")
 	// change file of main.go
@@ -260,8 +267,9 @@ func TestRebuild(t *testing.T) {
 	t.Logf("port is ready")
 	// stop engine
 	engine.Stop()
-	time.Sleep(time.Second * 1)
 	t.Logf("engine stopped")
+	wg.Wait()
+	time.Sleep(time.Second * 1)
 	assert.True(t, checkPortConnectionRefused(port))
 }
 
@@ -287,7 +295,7 @@ func waitingPortConnectionRefused(t *testing.T, port int, timeout time.Duration)
 }
 
 func TestCtrlCWhenHaveKillDelay(t *testing.T) {
-	// fix https://github.com/Robfz/air/issues/278
+	// fix https://github.com/air-verse/air/issues/278
 	// generate a random port
 	data := []byte("[build]\n  kill_delay = \"2s\"")
 	c := Config{}
@@ -302,21 +310,23 @@ func TestCtrlCWhenHaveKillDelay(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
 	engine.config.Build.KillDelay = c.Build.KillDelay
 	engine.config.Build.Delay = 2000
 	engine.config.Build.SendInterrupt = true
-	engine.config.preprocess()
+	if err := engine.config.preprocess(nil); err != nil {
+		t.Fatalf("Should not be fail: %s.", err)
+	}
 
 	go func() {
 		engine.Run()
 		t.Logf("engine stopped")
 	}()
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		<-sigs
 		engine.Stop()
@@ -331,7 +341,7 @@ func TestCtrlCWhenHaveKillDelay(t *testing.T) {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
 	time.Sleep(time.Second * 3)
-	assert.False(t, engine.running)
+	assert.False(t, engine.running.Load())
 }
 
 func TestCtrlCWhenREngineIsRunning(t *testing.T) {
@@ -343,7 +353,7 @@ func TestCtrlCWhenREngineIsRunning(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -367,14 +377,49 @@ func TestCtrlCWhenREngineIsRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
-	assert.False(t, engine.running)
+	assert.False(t, engine.running.Load())
+}
+
+func TestCtrlCWithFailedBin(t *testing.T) {
+	timeout := 5 * time.Second
+	done := make(chan struct{})
+	go func() {
+		dir := initWithQuickExitGoCode(t)
+		chdir(t, dir)
+		engine, err := NewEngine("", nil, true)
+		assert.NoError(t, err)
+		engine.config.Build.Bin = "<WRONGCOMAMND>"
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			engine.Run()
+			t.Logf("engine stopped")
+			wg.Done()
+		}()
+		go func() {
+			<-sigs
+			engine.Stop()
+			t.Logf("engine stopped")
+		}()
+		time.Sleep(time.Second * 1)
+		sigs <- syscall.SIGINT
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Error("Test timed out")
+	}
 }
 
 func TestFixCloseOfChannelAfterCtrlC(t *testing.T) {
-	// fix https://github.com/Robfz/air/issues/294
+	// fix https://github.com/air-verse/air/issues/294
 	dir := initWithBuildFailedCode(t)
 	chdir(t, dir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -410,16 +455,16 @@ func TestFixCloseOfChannelAfterCtrlC(t *testing.T) {
 	if err := waitingPortConnectionRefused(t, port, time.Second*10); err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
-	assert.False(t, engine.running)
+	assert.False(t, engine.running.Load())
 }
 
 func TestFixCloseOfChannelAfterTwoFailedBuild(t *testing.T) {
-	// fix https://github.com/Robfz/air/issues/294
+	// fix https://github.com/air-verse/air/issues/294
 	// happens after two failed builds
 	dir := initWithBuildFailedCode(t)
 	// change dir to tmpDir
 	chdir(t, dir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -453,7 +498,7 @@ func TestFixCloseOfChannelAfterTwoFailedBuild(t *testing.T) {
 	// ctrl + c
 	sigs <- syscall.SIGINT
 	time.Sleep(time.Second * 1)
-	assert.False(t, engine.running)
+	assert.False(t, engine.running.Load())
 }
 
 // waitingPortReady waits until the port is ready to be used.
@@ -485,7 +530,7 @@ func TestRun(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -499,7 +544,7 @@ func TestRun(t *testing.T) {
 	engine.Stop()
 	time.Sleep(time.Second * 1)
 	assert.False(t, checkPortHaveBeenUsed(port))
-	t.Logf("stoped")
+	t.Logf("stopped")
 }
 
 func checkPortConnectionRefused(port int) bool {
@@ -671,7 +716,7 @@ func TestRebuildWhenRunCmdUsingDLV(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -680,7 +725,7 @@ func TestRebuildWhenRunCmdUsingDLV(t *testing.T) {
 	dlvPort, f := GetPort()
 	f()
 	engine.config.Build.FullBin = fmt.Sprintf("dlv exec --accept-multiclient --log --headless --continue --listen :%d --api-version 2 ./tmp/main", dlvPort)
-	_ = engine.config.preprocess()
+	_ = engine.config.preprocess(nil)
 	go func() {
 		engine.Run()
 	}()
@@ -729,14 +774,17 @@ func TestWriteDefaultConfig(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	writeDefaultConfig()
-	// check the file is exist
-	if _, err := os.Stat(dftTOML); err != nil {
+	configName, err := writeDefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// check the file exists
+	if _, err := os.Stat(configName); err != nil {
 		t.Fatal(err)
 	}
 
 	// check the file content is right
-	actual, err := readConfig(dftTOML)
+	actual, err := readConfig(configName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,10 +815,10 @@ exclude_file = ["main.go"]
 include_file = ["test/not_a_test.go"]
 
 `
-	if err := ioutil.WriteFile(dftTOML, []byte(config), 0o644); err != nil {
+	if err := os.WriteFile(dftTOML, []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := NewEngine(".air.toml", true)
+	engine, err := NewEngine(".air.toml", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +839,10 @@ func TestShouldIncludeGoTestFile(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	writeDefaultConfig()
+	_, err := writeDefaultConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// write go test file
 	file, err := os.Create("main_test.go")
@@ -806,26 +857,31 @@ func Test(t *testing.T) {
 	t.Log("testing")
 }
 `)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// run sed
-	// check the file is exist
+	// check the file exists
 	if _, err := os.Stat(dftTOML); err != nil {
 		t.Fatal(err)
 	}
 	// check is MacOS
 	var cmd *exec.Cmd
+	toolName := "sed"
+
 	if runtime.GOOS == "darwin" {
-		cmd = exec.Command("gsed", "-i", "s/\"_test.*go\"//g", ".air.toml")
-	} else {
-		cmd = exec.Command("sed", "-i", "s/\"_test.*go\"//g", ".air.toml")
+		toolName = "gsed"
 	}
+
+	cmd = exec.Command(toolName, "-i", "s/\"_test.*go\"//g", ".air.toml")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
+		t.Skipf("unable to run %s, make sure the tool is installed to run this test", toolName)
 	}
 
 	time.Sleep(time.Second * 2)
-	engine, err := NewEngine(".air.toml", false)
+	engine, err := NewEngine(".air.toml", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +917,7 @@ func TestCreateNewDir(t *testing.T) {
 	tmpDir := initTestEnv(t, port)
 	// change dir to tmpDir
 	chdir(t, tmpDir)
-	engine, err := NewEngine("", true)
+	engine, err := NewEngine("", nil, true)
 	if err != nil {
 		t.Fatalf("Should not be fail: %s.", err)
 	}
@@ -902,7 +958,7 @@ include_ext = ["sh"]
 include_dir = ["nonexist"] # prevent default "." watch from taking effect
 include_file = ["main.sh"]
 `
-	if err := ioutil.WriteFile(dftTOML, []byte(config), 0o644); err != nil {
+	if err := os.WriteFile(dftTOML, []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -911,7 +967,7 @@ include_file = ["main.sh"]
 		t.Fatal(err)
 	}
 
-	engine, err := NewEngine(dftTOML, false)
+	engine, err := NewEngine(dftTOML, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,4 +998,146 @@ include_file = ["main.sh"]
 		t.Fatal(err)
 	}
 	assert.Equal(t, []byte("modified"), bytes)
+}
+
+func TestShouldIncludeIncludedFileWithoutIncludedExt(t *testing.T) {
+	port, f := GetPort()
+	f()
+	t.Logf("port: %d", port)
+
+	tmpDir := initTestEnv(t, port)
+
+	chdir(t, tmpDir)
+
+	config := `
+[build]
+cmd = "true" # do nothing
+full_bin = "sh main.sh"
+include_ext = ["go"]
+include_dir = ["nonexist"] # prevent default "." watch from taking effect
+include_file = ["main.sh"]
+`
+	if err := os.WriteFile(dftTOML, []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := os.WriteFile("main.sh", []byte("#!/bin/sh\nprintf original > output"), 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine, err := NewEngine(dftTOML, nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		engine.Run()
+	}()
+
+	time.Sleep(time.Second * 1)
+
+	bytes, err := os.ReadFile("output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, []byte("original"), bytes)
+
+	t.Logf("start change main.sh")
+	go func() {
+		err = os.WriteFile("main.sh", []byte("#!/bin/sh\nprintf modified > output"), 0o755)
+		if err != nil {
+			log.Fatalf("Error updating file: %s.", err)
+		}
+	}()
+
+	time.Sleep(time.Second * 3)
+
+	bytes, err = os.ReadFile("output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, []byte("modified"), bytes)
+}
+
+type testExiter struct {
+	t          *testing.T
+	called     bool
+	expectCode int
+}
+
+func (te *testExiter) Exit(code int) {
+	te.called = true
+	if code != te.expectCode {
+		te.t.Fatalf("expected exit code %d, got %d", te.expectCode, code)
+	}
+}
+
+func TestEngineExit(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(*Engine, chan<- int)
+		expectCode int
+		wantCalled bool
+	}{
+		{
+			name: "normal exit - no error",
+			setup: func(_ *Engine, exitCode chan<- int) {
+				go func() {
+					exitCode <- 0
+				}()
+			},
+			expectCode: 0,
+			wantCalled: false,
+		},
+		{
+			name: "error exit - non-zero code",
+			setup: func(_ *Engine, exitCode chan<- int) {
+				go func() {
+					exitCode <- 1
+				}()
+			},
+			expectCode: 1,
+			wantCalled: true,
+		},
+		{
+			name: "process timeout",
+			setup: func(_ *Engine, _ chan<- int) {
+			},
+			expectCode: 0,
+			wantCalled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e, err := NewEngine("", nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			exiter := &testExiter{
+				t:          t,
+				expectCode: tt.expectCode,
+			}
+			e.exiter = exiter
+
+			exitCode := make(chan int)
+
+			if tt.setup != nil {
+				tt.setup(e, exitCode)
+			}
+			select {
+			case ret := <-exitCode:
+				if ret != 0 {
+					e.exiter.Exit(ret)
+				}
+			case <-time.After(1 * time.Millisecond):
+				// timeout case
+			}
+
+			if tt.wantCalled != exiter.called {
+				t.Errorf("Exit() called = %v, want %v", exiter.called, tt.wantCalled)
+			}
+		})
+	}
 }
